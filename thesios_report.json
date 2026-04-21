@@ -1,0 +1,64 @@
+{
+  "target": "priority_label",
+  "classes": [
+    "high",
+    "low",
+    "medium"
+  ],
+  "categorical_columns": [
+    "application_grouped",
+    "io_zone",
+    "redundancy_type",
+    "op_type"
+  ],
+  "numeric_columns": [
+    "from_flash_cache",
+    "cache_hit",
+    "file_offset",
+    "file_age_seconds",
+    "request_io_size_bytes",
+    "disk_io_size_bytes",
+    "response_io_size_bytes",
+    "disk_time",
+    "simulated_latency",
+    "queue_delay_seconds",
+    "start_hour",
+    "start_minute"
+  ],
+  "max_rows": 200000,
+  "top_apps": 32,
+  "validation_accuracy": 0.9740494691262827,
+  "report": {
+    "high": {
+      "precision": 0.9796404591726229,
+      "recall": 0.9592788971367975,
+      "f1-score": 0.9693527646806687,
+      "support": 14145.0
+    },
+    "low": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1-score": 0.0,
+      "support": 18.0
+    },
+    "medium": {
+      "precision": 0.9701515075250415,
+      "recall": 0.9856302735873178,
+      "f1-score": 0.9778296382730455,
+      "support": 19555.0
+    },
+    "accuracy": 0.9740494691262827,
+    "macro avg": {
+      "precision": 0.6499306555658881,
+      "recall": 0.6483030569080385,
+      "f1-score": 0.6490608009845714,
+      "support": 33718.0
+    },
+    "weighted avg": {
+      "precision": 0.9736143016978748,
+      "recall": 0.9740494691262827,
+      "f1-score": 0.9737515105533384,
+      "support": 33718.0
+    }
+  }
+}
