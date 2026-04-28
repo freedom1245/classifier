@@ -37,6 +37,11 @@ def test_scheduler_env_reset() -> None:
     assert state.priority_counts == {"high": 0, "medium": 0, "low": 0}
     assert state.low_queue_fraction == 0.0
     assert state.starvation_pressure == 0.0
+    assert state.max_high_wait == 0
+    assert state.max_medium_wait == 0
+    assert state.deadline_missed_count == 0
+    assert state.wait_steps_std == 0.0
+    assert len(state.to_vector()) == 14
 
 
 def test_scheduler_state_masks_aggressive_low_priority_actions_when_high_is_waiting() -> None:
@@ -46,6 +51,12 @@ def test_scheduler_state_masks_aggressive_low_priority_actions_when_high_is_wait
     state.max_low_priority_wait_steps = 24
     state.low_queue_fraction = 0.5
     state.starvation_pressure = 1.2
+    state.max_high_wait = 10
+    state.max_medium_wait = 5
+    state.deadline_missed_count = 0
+    state.wait_steps_std = 5.0
+    state.remaining_fraction = 0.8
+    state.avg_sync_cost = 1.5
 
     allowed = state.allowed_actions(starvation_threshold=20)
 
@@ -257,323 +268,135 @@ def test_export_policy_comparison_figure_writes_image() -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def test_compute_reward_rewards_reducing_low_wait() -> None:
+def test_compute_reward_throughput_increases_with_priority() -> None:
     before = SchedulerEnv().reset()
-    before.max_low_priority_wait_steps = 20
-    before.queue_length = 4
-    before.priority_counts["low"] = 2
-    before.low_queue_fraction = 0.5
-    before.starvation_pressure = 1.0
+    before.queue_length = 3
+    before.max_low_priority_wait_steps = 10
+    before.max_high_wait = 10
+    before.max_medium_wait = 10
+    before.wait_steps_std = 2.0
     after = SchedulerEnv().reset()
-    after.max_low_priority_wait_steps = 5
-    after.queue_length = 3
-    after.priority_counts["low"] = 1
-    after.low_queue_fraction = 1 / 3
-    after.starvation_pressure = 0.25
+    after.queue_length = 2
+    after.max_low_priority_wait_steps = 8
+    after.max_high_wait = 8
+    after.max_medium_wait = 8
+    after.wait_steps_std = 3.0
 
-    reward = compute_reward(
-        previous_state=before,
-        state=after,
-        action=2,
-        processed_priority="low",
-        processed_delay_steps=2,
-        deadline_missed=False,
-        starvation_threshold=20,
-        reward_weights={
-            "high_priority_throughput": 1.0,
-            "average_delay_penalty": 0.05,
-            "starvation_penalty": 3.0,
-            "deadline_miss_penalty": 2.0,
-        },
+    weights = {
+        "throughput_weight": 1.0,
+        "delay_weight": 0.1,
+        "fairness_weight": 0.5,
+        "deadline_weight": 2.0,
+    }
+    high_reward = compute_reward(
+        previous_state=before, state=after,
+        action=0, processed_priority="high", processed_delay_steps=3,
+        deadline_missed=False, reward_weights=weights,
     )
+    medium_reward = compute_reward(
+        previous_state=before, state=after,
+        action=0, processed_priority="medium", processed_delay_steps=3,
+        deadline_missed=False, reward_weights=weights,
+    )
+    low_reward = compute_reward(
+        previous_state=before, state=after,
+        action=0, processed_priority="low", processed_delay_steps=3,
+        deadline_missed=False, reward_weights=weights,
+    )
+    assert high_reward > medium_reward > low_reward
 
+
+def test_compute_reward_penalizes_increasing_delay() -> None:
+    before = SchedulerEnv().reset()
+    before.queue_length = 3
+    before.average_wait_steps = 10.0
+    before.max_low_priority_wait_steps = 10
+    before.max_high_wait = 10
+    before.max_medium_wait = 10
+    before.wait_steps_std = 2.0
+    after_increase = SchedulerEnv().reset()
+    after_increase.queue_length = 2
+    after_increase.average_wait_steps = 15.0
+    after_increase.max_low_priority_wait_steps = 15
+    after_increase.max_high_wait = 15
+    after_increase.max_medium_wait = 15
+    after_increase.wait_steps_std = 3.0
+    after_decrease = SchedulerEnv().reset()
+    after_decrease.queue_length = 2
+    after_decrease.average_wait_steps = 5.0
+    after_decrease.max_low_priority_wait_steps = 5
+    after_decrease.max_high_wait = 5
+    after_decrease.max_medium_wait = 5
+    after_decrease.wait_steps_std = 1.0
+
+    weights = {
+        "throughput_weight": 1.0,
+        "delay_weight": 0.5,
+        "fairness_weight": 0.1,
+        "deadline_weight": 2.0,
+    }
+    reward_increase = compute_reward(
+        previous_state=before, state=after_increase,
+        action=0, processed_priority="medium", processed_delay_steps=3,
+        deadline_missed=False, reward_weights=weights,
+    )
+    reward_decrease = compute_reward(
+        previous_state=before, state=after_decrease,
+        action=0, processed_priority="medium", processed_delay_steps=3,
+        deadline_missed=False, reward_weights=weights,
+    )
+    assert reward_decrease > reward_increase
+
+
+def test_compute_reward_rewards_improved_fairness() -> None:
+    before = SchedulerEnv().reset()
+    before.queue_length = 6
+    before.average_wait_steps = 20.0
+    before.max_low_priority_wait_steps = 80
+    before.max_high_wait = 10
+    before.max_medium_wait = 30
+    before.wait_steps_std = 25.0
+    after = SchedulerEnv().reset()
+    after.queue_length = 5
+    after.average_wait_steps = 15.0
+    after.max_low_priority_wait_steps = 30
+    after.max_high_wait = 20
+    after.max_medium_wait = 25
+    after.wait_steps_std = 3.0
+
+    weights = {
+        "throughput_weight": 0.0,
+        "delay_weight": 0.1,
+        "fairness_weight": 2.0,
+        "deadline_weight": 2.0,
+    }
+    reward = compute_reward(
+        previous_state=before, state=after,
+        action=0, processed_priority="low", processed_delay_steps=5,
+        deadline_missed=False, reward_weights=weights,
+    )
     assert reward > 0
 
 
-def test_compute_reward_prefers_aging_when_starvation_is_active() -> None:
-    before = SchedulerEnv().reset()
-    before.queue_length = 6
-    before.priority_counts = {"high": 2, "medium": 1, "low": 3}
-    before.max_low_priority_wait_steps = 30
-    before.low_queue_fraction = 0.5
-    before.starvation_pressure = 1.5
+def test_queue_manager_deadline_count() -> None:
+    qm = QueueManager()
+    qm.push(CDCEvent("e1", "high", arrival_step=0, sync_cost=1.0, deadline_step=5))
+    qm.push(CDCEvent("e2", "low", arrival_step=1, sync_cost=1.0, deadline_step=3))
+    qm.push(CDCEvent("e3", "medium", arrival_step=2, sync_cost=1.0, deadline_step=None))
+    assert qm.deadline_missed_count() == 0
 
-    after = SchedulerEnv().reset()
-    after.queue_length = 5
-    after.priority_counts = {"high": 2, "medium": 1, "low": 2}
-    after.max_low_priority_wait_steps = 18
-    after.low_queue_fraction = 0.4
-    after.starvation_pressure = 0.9
+    qm.increment_wait_steps(4)
+    assert qm.deadline_missed_count() == 1
 
-    common_kwargs = {
-        "previous_state": before,
-        "state": after,
-        "processed_priority": "low",
-        "processed_delay_steps": 4,
-        "deadline_missed": False,
-        "starvation_threshold": 20,
-        "reward_weights": {
-            "high_priority_throughput": 1.0,
-            "high_priority_delay_penalty": 0.08,
-            "average_delay_penalty": 0.05,
-            "starvation_penalty": 3.0,
-            "deadline_miss_penalty": 2.0,
-            "aging_starvation_bonus": 3.0,
-            "aging_balancing_bonus": 1.0,
-            "aging_high_priority_penalty": 3.0,
-            "high_backlog_service_bonus": 2.0,
-            "guarded_high_service_bonus": 1.5,
-            "guarded_mixed_bonus": 1.5,
-            "strict_high_pressure_bonus": 1.0,
-            "defer_high_penalty": 2.0,
-            "light_aging_high_penalty": 2.0,
-            "low_rescue_high_penalty": 3.0,
-            "low_rescue_emergency_bonus": 1.5,
-            "low_rescue_overuse_penalty": 2.0,
-            "strict_under_starvation_penalty": 2.0,
-            "fifo_mixed_pressure_penalty": 2.5,
-            "low_priority_service_bonus": 1.0,
-            "low_queue_reduction_bonus": 0.75,
-        },
-    }
+    qm.increment_wait_steps(2)
+    assert qm.deadline_missed_count() == 2
 
-    aging_reward = compute_reward(action=2, **common_kwargs)
-    strict_reward = compute_reward(action=1, **common_kwargs)
+    event = qm.pop_priority("high")
+    assert event is not None
+    assert qm.deadline_missed_count() == 1
 
-    assert aging_reward > strict_reward
-
-
-def test_compute_reward_penalizes_fifo_when_high_and_starved_low_coexist() -> None:
-    before = SchedulerEnv().reset()
-    before.queue_length = 8
-    before.priority_counts = {"high": 3, "medium": 1, "low": 4}
-    before.max_low_priority_wait_steps = 28
-    before.low_queue_fraction = 0.5
-    before.starvation_pressure = 1.4
-
-    after = SchedulerEnv().reset()
-    after.queue_length = 7
-    after.priority_counts = {"high": 3, "medium": 1, "low": 3}
-    after.max_low_priority_wait_steps = 20
-    after.low_queue_fraction = 3 / 7
-    after.starvation_pressure = 1.0
-
-    reward_kwargs = {
-        "previous_state": before,
-        "state": after,
-        "processed_priority": "low",
-        "processed_delay_steps": 3,
-        "deadline_missed": False,
-        "starvation_threshold": 20,
-        "reward_weights": {
-            "high_priority_throughput": 1.0,
-            "high_priority_delay_penalty": 0.08,
-            "average_delay_penalty": 0.05,
-            "starvation_penalty": 3.0,
-            "deadline_miss_penalty": 2.0,
-            "aging_starvation_bonus": 3.0,
-            "aging_balancing_bonus": 1.0,
-            "aging_high_priority_penalty": 3.0,
-            "high_backlog_service_bonus": 2.0,
-            "guarded_high_service_bonus": 1.5,
-            "guarded_mixed_bonus": 1.5,
-            "strict_high_pressure_bonus": 1.0,
-            "defer_high_penalty": 2.0,
-            "light_aging_high_penalty": 2.0,
-            "low_rescue_high_penalty": 3.0,
-            "low_rescue_emergency_bonus": 1.5,
-            "low_rescue_overuse_penalty": 2.0,
-            "strict_under_starvation_penalty": 2.0,
-            "fifo_mixed_pressure_penalty": 2.5,
-            "low_priority_service_bonus": 1.0,
-            "low_queue_reduction_bonus": 0.75,
-        },
-    }
-
-    fifo_reward = compute_reward(action=0, **reward_kwargs)
-    aging_reward = compute_reward(action=2, **reward_kwargs)
-
-    assert aging_reward > fifo_reward
-
-
-def test_compute_reward_penalizes_aging_when_high_queue_is_waiting() -> None:
-    before = SchedulerEnv().reset()
-    before.queue_length = 10
-    before.priority_counts = {"high": 5, "medium": 1, "low": 4}
-    before.max_low_priority_wait_steps = 30
-    before.low_queue_fraction = 0.4
-    before.starvation_pressure = 1.5
-
-    after = SchedulerEnv().reset()
-    after.queue_length = 9
-    after.priority_counts = {"high": 5, "medium": 1, "low": 3}
-    after.max_low_priority_wait_steps = 20
-    after.low_queue_fraction = 1 / 3
-    after.starvation_pressure = 1.0
-
-    reward_kwargs = {
-        "previous_state": before,
-        "state": after,
-        "processed_delay_steps": 3,
-        "deadline_missed": False,
-        "starvation_threshold": 20,
-        "reward_weights": {
-            "high_priority_throughput": 1.0,
-            "high_priority_delay_penalty": 0.08,
-            "average_delay_penalty": 0.05,
-            "starvation_penalty": 3.0,
-            "deadline_miss_penalty": 2.0,
-            "aging_starvation_bonus": 3.0,
-            "aging_balancing_bonus": 1.0,
-            "aging_high_priority_penalty": 3.0,
-            "high_backlog_service_bonus": 2.0,
-            "guarded_high_service_bonus": 1.5,
-            "guarded_mixed_bonus": 1.5,
-            "strict_high_pressure_bonus": 1.0,
-            "defer_high_penalty": 2.0,
-            "light_aging_high_penalty": 2.0,
-            "low_rescue_high_penalty": 3.0,
-            "low_rescue_emergency_bonus": 1.5,
-            "low_rescue_overuse_penalty": 2.0,
-            "strict_under_starvation_penalty": 2.0,
-            "fifo_mixed_pressure_penalty": 2.5,
-            "low_priority_service_bonus": 1.0,
-            "low_queue_reduction_bonus": 0.75,
-        },
-    }
-
-    aging_low_reward = compute_reward(
-        action=2,
-        processed_priority="low",
-        **reward_kwargs,
-    )
-    aging_high_reward = compute_reward(
-        action=2,
-        processed_priority="high",
-        **reward_kwargs,
-    )
-
-    assert aging_high_reward > aging_low_reward
-
-
-def test_compute_reward_prefers_guarded_high_service_under_mixed_pressure() -> None:
-    before = SchedulerEnv().reset()
-    before.queue_length = 10
-    before.priority_counts = {"high": 4, "medium": 1, "low": 5}
-    before.max_low_priority_wait_steps = 28
-    before.low_queue_fraction = 0.5
-    before.starvation_pressure = 1.4
-
-    after = SchedulerEnv().reset()
-    after.queue_length = 9
-    after.priority_counts = {"high": 3, "medium": 1, "low": 5}
-    after.max_low_priority_wait_steps = 18
-    after.low_queue_fraction = 5 / 9
-    after.starvation_pressure = 0.9
-
-    reward_kwargs = {
-        "previous_state": before,
-        "state": after,
-        "processed_delay_steps": 3,
-        "deadline_missed": False,
-        "starvation_threshold": 20,
-        "reward_weights": {
-            "high_priority_throughput": 1.0,
-            "high_priority_delay_penalty": 0.08,
-            "average_delay_penalty": 0.05,
-            "starvation_penalty": 3.0,
-            "deadline_miss_penalty": 2.0,
-            "aging_starvation_bonus": 3.0,
-            "aging_balancing_bonus": 1.0,
-            "aging_high_priority_penalty": 3.0,
-            "high_backlog_service_bonus": 2.0,
-            "guarded_high_service_bonus": 1.5,
-            "guarded_mixed_bonus": 1.5,
-            "strict_high_pressure_bonus": 1.0,
-            "defer_high_penalty": 2.0,
-            "light_aging_high_penalty": 2.0,
-            "low_rescue_high_penalty": 3.0,
-            "low_rescue_emergency_bonus": 1.5,
-            "low_rescue_overuse_penalty": 2.0,
-            "strict_under_starvation_penalty": 2.0,
-            "fifo_mixed_pressure_penalty": 2.5,
-            "low_priority_service_bonus": 1.0,
-            "low_queue_reduction_bonus": 0.75,
-        },
-    }
-
-    guarded_high_reward = compute_reward(
-        action=4,
-        processed_priority="high",
-        **reward_kwargs,
-    )
-    low_rescue_reward = compute_reward(
-        action=5,
-        processed_priority="low",
-        **reward_kwargs,
-    )
-
-    assert guarded_high_reward > low_rescue_reward
-
-
-def test_compute_reward_penalizes_low_rescue_when_not_in_emergency_mode() -> None:
-    before = SchedulerEnv().reset()
-    before.queue_length = 10
-    before.priority_counts = {"high": 4, "medium": 1, "low": 5}
-    before.max_low_priority_wait_steps = 24
-    before.low_queue_fraction = 0.5
-    before.starvation_pressure = 1.2
-
-    after = SchedulerEnv().reset()
-    after.queue_length = 9
-    after.priority_counts = {"high": 4, "medium": 1, "low": 4}
-    after.max_low_priority_wait_steps = 20
-    after.low_queue_fraction = 4 / 9
-    after.starvation_pressure = 1.0
-
-    reward_kwargs = {
-        "previous_state": before,
-        "state": after,
-        "processed_delay_steps": 3,
-        "deadline_missed": False,
-        "starvation_threshold": 20,
-        "reward_weights": {
-            "high_priority_throughput": 1.0,
-            "high_priority_delay_penalty": 0.08,
-            "average_delay_penalty": 0.05,
-            "starvation_penalty": 3.0,
-            "deadline_miss_penalty": 2.0,
-            "aging_starvation_bonus": 3.0,
-            "aging_balancing_bonus": 1.0,
-            "aging_high_priority_penalty": 3.0,
-            "high_backlog_service_bonus": 2.0,
-            "guarded_high_service_bonus": 1.5,
-            "guarded_mixed_bonus": 1.5,
-            "strict_high_pressure_bonus": 1.0,
-            "defer_high_penalty": 2.0,
-            "light_aging_high_penalty": 2.0,
-            "low_rescue_high_penalty": 3.0,
-            "low_rescue_emergency_bonus": 1.5,
-            "low_rescue_overuse_penalty": 2.0,
-            "strict_under_starvation_penalty": 2.0,
-            "fifo_mixed_pressure_penalty": 2.5,
-            "low_priority_service_bonus": 1.0,
-            "low_queue_reduction_bonus": 0.75,
-        },
-    }
-
-    low_rescue_reward = compute_reward(
-        action=5,
-        processed_priority="low",
-        **reward_kwargs,
-    )
-    guarded_high_reward = compute_reward(
-        action=4,
-        processed_priority="high",
-        **reward_kwargs,
-    )
-
-    assert guarded_high_reward > low_rescue_reward
+    qm.increment_wait_steps(0)
+    assert qm.deadline_missed_count() == 1
 
 
 def test_ppo_agent_can_sample_and_optimize() -> None:

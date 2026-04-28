@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -21,17 +22,6 @@ class SchedulerMetrics:
     completed_events: int
     high_priority_average_delay_steps: float
     fairness_index: float
-
-
-@dataclass
-class ScheduledEventRecord:
-    event_id: str
-    policy: str
-    priority: str
-    arrival_step: int
-    start_step: int
-    end_step: int
-    wait_steps: int
 
 
 def load_scheduler_events(data_path: Path) -> list[CDCEvent]:
@@ -87,7 +77,7 @@ def simulate_policy(
     policy_name: str,
     starvation_threshold: int = 5,
 ) -> SchedulerMetrics:
-    # 这里是“固定策略”的离线重放仿真，用来和 DQN 做同口径比较。
+    # 这里是“固定策略”的离线重放仿真，用来和 RL 策略做同口径比较。
     queue_manager = QueueManager()
     current_step = 0
     next_index = 0
@@ -181,65 +171,6 @@ def compare_policies(
     return pd.DataFrame(rows)
 
 
-def simulate_policy_trace(
-    events: list[CDCEvent],
-    policy_name: str,
-    starvation_threshold: int = 5,
-) -> list[ScheduledEventRecord]:
-    # 该函数主要服务可视化，用来画不同策略下的执行时间线。
-    queue_manager = QueueManager()
-    current_step = 0
-    next_index = 0
-    records: list[ScheduledEventRecord] = []
-
-    while next_index < len(events) or len(queue_manager) > 0:
-        while next_index < len(events) and events[next_index].arrival_step <= current_step:
-            event = events[next_index]
-            queue_manager.push(
-                CDCEvent(
-                    event_id=event.event_id,
-                    priority=event.priority,
-                    arrival_step=event.arrival_step,
-                    sync_cost=event.sync_cost,
-                    deadline_step=event.deadline_step,
-                    wait_steps=0,
-                    service_steps=event.service_steps,
-                )
-            )
-            next_index += 1
-
-        if len(queue_manager) == 0:
-            current_step = events[next_index].arrival_step
-            continue
-
-        event = _select_event(
-            queue_manager,
-            policy_name=policy_name,
-            starvation_threshold=starvation_threshold,
-        )
-        if event is None:
-            current_step += 1
-            continue
-
-        start_step = current_step
-        end_step = current_step + event.service_steps
-        records.append(
-            ScheduledEventRecord(
-                event_id=event.event_id,
-                policy=policy_name,
-                priority=event.priority,
-                arrival_step=event.arrival_step,
-                start_step=start_step,
-                end_step=end_step,
-                wait_steps=start_step - event.arrival_step,
-            )
-        )
-        queue_manager.increment_wait_steps(event.service_steps)
-        current_step = end_step
-
-    return records
-
-
 def _cache_metadata_path(output_path: Path) -> Path:
     return output_path.with_suffix(output_path.suffix + ".meta.json")
 
@@ -312,6 +243,7 @@ def export_policy_comparison_figure(
         "strict_priority": "#EF4444",
         "aging": "#10B981",
         "dqn": "#F59E0B",
+        "ppo": "#8B5CF6",
     }
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -332,73 +264,6 @@ def export_policy_comparison_figure(
             axis.text(index, value, f"{value:.3f}", ha="center", va="bottom", fontsize=8)
 
     fig.suptitle("Scheduler Policy Comparison", fontsize=14)
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    return output_path
-
-
-def export_policy_timeline_figure(
-    data_path: Path,
-    output_path: Path,
-    starvation_threshold: int = 5,
-    max_events_per_policy: int = 40,
-) -> Path:
-    events = load_scheduler_events(data_path)
-    policy_names = ("fifo", "strict_priority", "aging")
-    traces = {
-        policy_name: simulate_policy_trace(
-            events,
-            policy_name=policy_name,
-            starvation_threshold=starvation_threshold,
-        )[:max_events_per_policy]
-        for policy_name in policy_names
-    }
-    colors = {
-        "high": "#DC2626",
-        "medium": "#D97706",
-        "low": "#2563EB",
-    }
-
-    fig, axes = plt.subplots(len(policy_names), 1, figsize=(14, 8), sharex=False)
-    if len(policy_names) == 1:
-        axes = [axes]
-
-    for axis, policy_name in zip(axes, policy_names):
-        records = traces[policy_name]
-        positions = list(range(len(records)))
-        labels = [record.event_id for record in records]
-        starts = [record.start_step for record in records]
-        durations = [max(record.end_step - record.start_step, 1) for record in records]
-
-        axis.barh(
-            positions,
-            durations,
-            left=starts,
-            color=[colors.get(record.priority, "#6B7280") for record in records],
-            edgecolor="white",
-            linewidth=0.8,
-        )
-        for position, record in zip(positions, records):
-            axis.text(
-                record.start_step,
-                position,
-                f" {record.priority} | wait={record.wait_steps}",
-                va="center",
-                ha="left",
-                fontsize=8,
-            )
-
-        axis.set_yticks(positions)
-        axis.set_yticklabels(labels, fontsize=8)
-        axis.invert_yaxis()
-        axis.set_title(f"{policy_name} scheduling timeline")
-        axis.set_xlabel("Step")
-        axis.set_ylabel("Event")
-        axis.grid(axis="x", linestyle="--", linewidth=0.6, alpha=0.4)
-
-    fig.suptitle("Scheduler Execution Timeline", fontsize=14)
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180, bbox_inches="tight")

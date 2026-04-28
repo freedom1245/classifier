@@ -22,10 +22,14 @@ class SchedulerState:
     max_low_priority_wait_steps: int
     low_queue_fraction: float
     starvation_pressure: float
+    max_high_wait: int
+    max_medium_wait: int
+    deadline_missed_count: int
+    wait_steps_std: float
+    remaining_fraction: float
+    avg_sync_cost: float
 
     def to_vector(self) -> list[float]:
-        # 除了队列规模和等待强度，还显式暴露低优占比与饥饿压力，
-        # 让智能体更容易学习“什么时候适合轻 aging，什么时候需要救援低优”。
         return [
             float(self.queue_length),
             float(self.average_wait_steps),
@@ -35,7 +39,25 @@ class SchedulerState:
             float(self.max_low_priority_wait_steps),
             float(self.low_queue_fraction),
             float(self.starvation_pressure),
+            float(self.max_high_wait),
+            float(self.max_medium_wait),
+            float(self.deadline_missed_count),
+            float(self.wait_steps_std),
+            float(self.remaining_fraction),
+            float(self.avg_sync_cost),
         ]
+
+    def fairness_index(self) -> float:
+        waits = [
+            float(self.max_high_wait),
+            float(self.max_medium_wait),
+            float(self.max_low_priority_wait_steps),
+        ]
+        numerator = sum(waits) ** 2
+        denominator = 3 * sum(w * w for w in waits)
+        if denominator < 1e-12:
+            return 1.0
+        return numerator / denominator
 
     def allowed_actions(self, starvation_threshold: int) -> list[int]:
         high_count = int(self.priority_counts.get("high", 0))
@@ -72,6 +94,7 @@ class SchedulerEnv:
     starvation_threshold: int = 5
     current_step: int = 0
     next_event_index: int = 0
+    total_events: int = 0
 
     ACTION_NAMES = ACTION_NAMES
 
@@ -79,6 +102,7 @@ class SchedulerEnv:
         self.queue_manager = QueueManager()
         self.current_step = 0
         self.next_event_index = 0
+        self.total_events = len(self.events)
         self._enqueue_arrivals()
         return self.get_state()
 
@@ -139,6 +163,9 @@ class SchedulerEnv:
         priority_counts = self.queue_manager.priority_counts()
         queue_length = len(self.queue_manager)
         max_low_priority_wait_steps = self.queue_manager.max_wait_steps_for_priority("low")
+        remaining_fraction = (
+            (self.total_events - self.next_event_index) / max(self.total_events, 1)
+        )
         return SchedulerState(
             queue_length=queue_length,
             average_wait_steps=self.queue_manager.average_wait_steps(),
@@ -146,6 +173,12 @@ class SchedulerEnv:
             max_low_priority_wait_steps=max_low_priority_wait_steps,
             low_queue_fraction=priority_counts.get("low", 0) / max(queue_length, 1),
             starvation_pressure=max_low_priority_wait_steps / max(self.starvation_threshold, 1),
+            max_high_wait=self.queue_manager.max_wait_steps_for_priority("high"),
+            max_medium_wait=self.queue_manager.max_wait_steps_for_priority("medium"),
+            deadline_missed_count=self.queue_manager.deadline_missed_count(),
+            wait_steps_std=self.queue_manager.wait_steps_std(),
+            remaining_fraction=remaining_fraction,
+            avg_sync_cost=self.queue_manager.avg_sync_cost(),
         )
 
     def step(self, action: int) -> tuple[SchedulerState, float, bool, dict]:
@@ -183,7 +216,6 @@ class SchedulerEnv:
             processed_priority=info["processed_priority"],
             processed_delay_steps=processed_delay_steps,
             deadline_missed=deadline_missed,
-            starvation_threshold=self.starvation_threshold,
             reward_weights=self.reward_weights,
         )
         done = self.next_event_index >= len(self.events) and len(self.queue_manager) == 0

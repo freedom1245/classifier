@@ -1,3 +1,4 @@
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from itertools import chain
@@ -17,6 +18,7 @@ class QueueManager:
     wait_offset: int = 0
     size: int = 0
     relative_wait_sum: float = 0.0
+    _deadline_missed: int = 0
 
     @property
     def events(self) -> list[CDCEvent]:
@@ -29,12 +31,25 @@ class QueueManager:
         )
 
     def push(self, event: CDCEvent) -> None:
-        # 事件内部只保存“相对等待值”，全局等待增长统一由 wait_offset 维护。
         event.wait_steps -= self.wait_offset
         queue = self.priority_queues.setdefault(event.priority, deque())
         queue.append(event)
         self.size += 1
         self.relative_wait_sum += event.wait_steps
+        if self._is_event_deadline_missed(event):
+            self._deadline_missed += 1
+
+    def _is_event_deadline_missed(self, event: CDCEvent) -> bool:
+        if event.deadline_step is None:
+            return False
+        return self.effective_wait_steps(event) > event.deadline_step
+
+    def _sync_deadline_counter(self) -> None:
+        self._deadline_missed = 0
+        for queue in self.priority_queues.values():
+            for event in queue:
+                if self._is_event_deadline_missed(event):
+                    self._deadline_missed += 1
 
     def effective_wait_steps(self, event: CDCEvent) -> int:
         return event.wait_steps + self.wait_offset
@@ -47,6 +62,8 @@ class QueueManager:
         self.size -= 1
         self.relative_wait_sum -= event.wait_steps
         event.wait_steps = self.effective_wait_steps(event)
+        if self._is_event_deadline_missed(event):
+            self._deadline_missed -= 1
         return event
 
     def pop_priority(self, priority: str) -> CDCEvent | None:
@@ -123,6 +140,7 @@ class QueueManager:
 
     def increment_wait_steps(self, delta: int = 1) -> None:
         self.wait_offset += delta
+        self._sync_deadline_counter()
 
     def priority_counts(self) -> dict[str, int]:
         return {
@@ -144,3 +162,19 @@ class QueueManager:
 
     def __len__(self) -> int:
         return self.size
+
+    def deadline_missed_count(self) -> int:
+        return self._deadline_missed
+
+    def wait_steps_std(self) -> float:
+        if self.size < 2:
+            return 0.0
+        raw = [self.effective_wait_steps(event) for event in self.events]
+        mean = sum(raw) / len(raw)
+        variance = sum((x - mean) ** 2 for x in raw) / len(raw)
+        return math.sqrt(variance)
+
+    def avg_sync_cost(self) -> float:
+        if self.size == 0:
+            return 0.0
+        return sum(event.sync_cost for event in self.events) / self.size

@@ -12,7 +12,6 @@ from .evaluate import (
     append_policy_result,
     export_policy_comparison,
     export_policy_comparison_figure,
-    export_policy_timeline_figure,
     load_scheduler_events,
 )
 from .event import CDCEvent
@@ -525,12 +524,6 @@ def run_scheduler_training(config_path: Path) -> None:
         comparison_csv_path=output_dir / "policy_comparison.csv",
         output_path=output_dir / "policy_comparison.png",
     )
-    timeline_figure_path = export_policy_timeline_figure(
-        data_path=dataset_dir / "test.csv",
-        output_path=output_dir / "policy_timeline.png",
-        starvation_threshold=starvation_threshold,
-    )
-
     if algorithm == "dqn":
         agent.epsilon = original_epsilon
 
@@ -556,4 +549,3 @@ def run_scheduler_training(config_path: Path) -> None:
     print(f"[scheduler] saved agent to: {model_path}")
     print(f"[scheduler] saved report to: {report_path}")
     print(f"[scheduler] saved comparison figure to: {comparison_figure_path}")
-    print(f"[scheduler] saved timeline figure to: {timeline_figure_path}")

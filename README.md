@@ -9,7 +9,7 @@ reinforcement-learning-based synchronization scheduling.
 - `python build_scheduler_dataset.py`: build the scheduler dataset with time-ordered splits
 - `python train_classifier.py`: train the tabular priority classifier
 - `python train_scheduler.py`: train the DQN-based scheduler
-- `python -m cdc_priority.cli scheduler-visualize --skip-timeline`: export scheduler comparison results faster during iteration
+- `python -m cdc_priority.cli scheduler-visualize`: export scheduler comparison tables and figures
 - `python run_pipeline.py`: reserved for end-to-end pipeline execution
 
 ## Structure

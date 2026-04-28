@@ -26,16 +26,8 @@ epsilon_start: 1.0
 epsilon_end: 0.05
 epsilon_decay: 0.995
 reward_weights:
-  high_priority_throughput: 1.0
-  high_priority_delay_penalty: 0.08
-  average_delay_penalty: 0.05
-  starvation_penalty: 3.0
-  deadline_miss_penalty: 2.0
-  aging_starvation_bonus: 3.0
-  aging_balancing_bonus: 1.0
-  aging_high_priority_penalty: 3.0
-  strict_under_starvation_penalty: 2.0
-  fifo_mixed_pressure_penalty: 2.5
-  low_priority_service_bonus: 1.0
-  low_queue_reduction_bonus: 0.75
+  throughput_weight: 1.0
+  delay_weight: 0.1
+  fairness_weight: 0.5
+  deadline_weight: 2.0
 output_dir: outputs/scheduler
