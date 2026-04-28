@@ -1,24 +1,28 @@
 dataset_config: configs/dataset.yaml
 scheduler_dataset_dir: data/scheduler_processed
 classifier_output_dir: outputs/classifier
-algorithm: dqn
+algorithm: ppo
 episode_count: 40
 max_steps_per_episode: 1500
 train_event_window: 12000
 valid_event_window: 6000
 random_state: 42
+selection_reward_tolerance: 1000.0
+selection_high_delay_tolerance: 250.0
+selection_fairness_tolerance: 0.0001
 ppo_hidden_dim: 128
 gae_lambda: 0.95
-ppo_clip_epsilon: 0.2
-ppo_update_epochs: 4
+ppo_clip_epsilon: 0.12
+ppo_update_epochs: 3
 ppo_mini_batch_size: 128
 ppo_value_coef: 0.5
-ppo_entropy_coef: 0.01
+ppo_entropy_coef: 0.05
+ppo_max_grad_norm: 0.5
 queue_capacity: 10000
 service_rate: 128
 starvation_threshold: 20
 gamma: 0.99
-learning_rate: 0.001
+learning_rate: 0.0003
 batch_size: 64
 replay_capacity: 5000
 target_update_interval: 20
@@ -26,16 +30,25 @@ epsilon_start: 1.0
 epsilon_end: 0.05
 epsilon_decay: 0.995
 reward_weights:
-  high_priority_throughput: 1.0
-  high_priority_delay_penalty: 0.08
+  high_priority_throughput: 1.5
+  high_priority_delay_penalty: 0.18
   average_delay_penalty: 0.05
   starvation_penalty: 3.0
   deadline_miss_penalty: 2.0
-  aging_starvation_bonus: 3.0
-  aging_balancing_bonus: 1.0
-  aging_high_priority_penalty: 3.0
+  aging_starvation_bonus: 2.2
+  aging_balancing_bonus: 0.8
+  aging_high_priority_penalty: 5.0
+  high_backlog_service_bonus: 4.5
+  guarded_high_service_bonus: 2.5
+  guarded_mixed_bonus: 2.0
+  strict_high_pressure_bonus: 1.5
+  defer_high_penalty: 4.0
+  light_aging_high_penalty: 3.5
+  low_rescue_high_penalty: 6.0
+  low_rescue_emergency_bonus: 1.0
+  low_rescue_overuse_penalty: 3.5
   strict_under_starvation_penalty: 2.0
   fifo_mixed_pressure_penalty: 2.5
   low_priority_service_bonus: 1.0
   low_queue_reduction_bonus: 0.75
-output_dir: outputs/scheduler
+output_dir: outputs/scheduler_ppo

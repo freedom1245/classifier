@@ -42,9 +42,11 @@ Thumbs.db
 # Local datasets and generated data
 data/raw/*
 data/processed/*
+data/scheduler_processed/*
 data/reports/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/scheduler_processed/.gitkeep
 !data/reports/.gitkeep
 *.csv
 *.parquet
@@ -60,11 +62,8 @@ outputs/figures/*
 *.pth
 *.ckpt
 *_report.json
-
+*.png
+pytest-temp-*/
 # Notebook checkpoints
 .ipynb_checkpoints/
-
-thesios_classifier/
-train_thesios_classifier.py
-
 

@@ -1,5 +1,7 @@
+import sys
+
 from cdc_priority.cli import main
 
 
 if __name__ == "__main__":
-    main(["dataset"])
+    main(["dataset", *sys.argv[1:]])

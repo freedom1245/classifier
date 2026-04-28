@@ -1,7 +1,15 @@
 from dataclasses import dataclass, field
 
 from .event import CDCEvent
-from .policies import aging_policy, fifo_policy, strict_priority_policy
+from .policies import (
+    ACTION_NAMES,
+    aging_light_policy,
+    aging_strong_policy,
+    fifo_policy,
+    high_guarded_aging_policy,
+    low_rescue_policy,
+    strict_priority_policy,
+)
 from .queue_manager import QueueManager
 from .reward import compute_reward
 
@@ -12,8 +20,12 @@ class SchedulerState:
     average_wait_steps: float
     priority_counts: dict[str, int]
     max_low_priority_wait_steps: int
+    low_queue_fraction: float
+    starvation_pressure: float
 
     def to_vector(self) -> list[float]:
+        # 除了队列规模和等待强度，还显式暴露低优占比与饥饿压力，
+        # 让智能体更容易学习“什么时候适合轻 aging，什么时候需要救援低优”。
         return [
             float(self.queue_length),
             float(self.average_wait_steps),
@@ -21,7 +33,35 @@ class SchedulerState:
             float(self.priority_counts.get("medium", 0)),
             float(self.priority_counts.get("low", 0)),
             float(self.max_low_priority_wait_steps),
+            float(self.low_queue_fraction),
+            float(self.starvation_pressure),
         ]
+
+    def allowed_actions(self, starvation_threshold: int) -> list[int]:
+        high_count = int(self.priority_counts.get("high", 0))
+        low_count = int(self.priority_counts.get("low", 0))
+        pressure = float(self.starvation_pressure)
+        allowed = {0, 1, 2, 3, 4, 5}
+
+        # 没有低优待处理时，不需要做低优救援。
+        if low_count <= 0:
+            allowed.discard(5)
+
+        # 高优存在但低优压力还不够强时，禁止最激进的低优优先动作。
+        if high_count > 0 and pressure < 2.0:
+            allowed.discard(5)
+
+        # 高优存在且低优压力还不算特别严重时，避免直接上强 aging。
+        if high_count > 0 and pressure < 1.5:
+            allowed.discard(3)
+
+        # 高低优同时积压时，保留 guarded 动作为优先折中选项。
+        if high_count > 0 and low_count > 0 and pressure >= 1.0:
+            allowed.add(4)
+
+        if not allowed:
+            return list(range(len(SchedulerEnv.ACTION_NAMES)))
+        return sorted(allowed)
 
 
 @dataclass
@@ -32,6 +72,8 @@ class SchedulerEnv:
     starvation_threshold: int = 5
     current_step: int = 0
     next_event_index: int = 0
+
+    ACTION_NAMES = ACTION_NAMES
 
     def reset(self) -> SchedulerState:
         self.queue_manager = QueueManager()
@@ -60,26 +102,50 @@ class SchedulerEnv:
             self.next_event_index += 1
 
     def _select_event(self, action: int) -> CDCEvent | None:
+        # 细粒度动作空间：
+        # 0 fifo
+        # 1 strict_priority
+        # 2 aging_light
+        # 3 aging_strong
+        # 4 high_guarded_aging
+        # 5 low_rescue
         if action == 0:
             return fifo_policy(self.queue_manager)
         if action == 1:
             return strict_priority_policy(self.queue_manager)
         if action == 2:
-            return aging_policy(
+            return aging_light_policy(
+                self.queue_manager,
+                starvation_threshold=self.starvation_threshold,
+            )
+        if action == 3:
+            return aging_strong_policy(
+                self.queue_manager,
+                starvation_threshold=self.starvation_threshold,
+            )
+        if action == 4:
+            return high_guarded_aging_policy(
+                self.queue_manager,
+                starvation_threshold=self.starvation_threshold,
+            )
+        if action == 5:
+            return low_rescue_policy(
                 self.queue_manager,
                 starvation_threshold=self.starvation_threshold,
             )
         raise ValueError(f"Unsupported action: {action}")
 
     def get_state(self) -> SchedulerState:
-        low_waits = [
-            event.wait_steps for event in self.queue_manager.events if event.priority == "low"
-        ]
+        priority_counts = self.queue_manager.priority_counts()
+        queue_length = len(self.queue_manager)
+        max_low_priority_wait_steps = self.queue_manager.max_wait_steps_for_priority("low")
         return SchedulerState(
-            queue_length=len(self.queue_manager),
+            queue_length=queue_length,
             average_wait_steps=self.queue_manager.average_wait_steps(),
-            priority_counts=self.queue_manager.priority_counts(),
-            max_low_priority_wait_steps=max(low_waits, default=0),
+            priority_counts=priority_counts,
+            max_low_priority_wait_steps=max_low_priority_wait_steps,
+            low_queue_fraction=priority_counts.get("low", 0) / max(queue_length, 1),
+            starvation_pressure=max_low_priority_wait_steps / max(self.starvation_threshold, 1),
         )
 
     def step(self, action: int) -> tuple[SchedulerState, float, bool, dict]:
@@ -102,6 +168,7 @@ class SchedulerEnv:
                 deadline_missed = processed_delay_steps > processed_event.deadline_step
             info["processed_event_id"] = processed_event.event_id
             info["processed_priority"] = processed_event.priority
+            # 处理一条事件后，全局等待偏移和仿真时间同步前进。
             self.queue_manager.increment_wait_steps(processed_event.service_steps)
             self.current_step += processed_event.service_steps
         else:
@@ -112,9 +179,11 @@ class SchedulerEnv:
         reward = compute_reward(
             previous_state=previous_state,
             state=state,
+            action=action,
             processed_priority=info["processed_priority"],
             processed_delay_steps=processed_delay_steps,
             deadline_missed=deadline_missed,
+            starvation_threshold=self.starvation_threshold,
             reward_weights=self.reward_weights,
         )
         done = self.next_event_index >= len(self.events) and len(self.queue_manager) == 0

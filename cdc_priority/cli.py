@@ -2,12 +2,17 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from .classifier.training import run_classifier_training
+from .classifier.training import run_classifier_ablations, run_classifier_training
 from .data.dataset_builder import (
     build_and_export_dataset_from_config,
     build_and_export_scheduler_dataset_from_config,
 )
 from .pipeline.online_simulation import run_pipeline
+from .scheduler.evaluate import (
+    export_policy_comparison,
+    export_policy_comparison_figure,
+    export_policy_timeline_figure,
+)
 from .scheduler.training import run_scheduler_training
 from .settings import default_settings
 
@@ -21,6 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     classifier_parser = subparsers.add_parser("classifier")
     classifier_parser.add_argument(
+        "--config",
+        type=Path,
+        default=settings.configs_dir / "classifier.yaml",
+        help="Classifier YAML config path.",
+    )
+
+    classifier_ablation_parser = subparsers.add_parser("classifier-ablation")
+    classifier_ablation_parser.add_argument(
         "--config",
         type=Path,
         default=settings.configs_dir / "classifier.yaml",
@@ -75,6 +88,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timestamp column used for time-ordered scheduler splitting.",
     )
 
+    scheduler_visualize_parser = subparsers.add_parser("scheduler-visualize")
+    scheduler_visualize_parser.add_argument(
+        "--data",
+        type=Path,
+        default=settings.project_root / "data" / "scheduler_processed" / "test.csv",
+        help="Scheduler evaluation dataset path.",
+    )
+    scheduler_visualize_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=settings.project_root / "outputs" / "scheduler",
+        help="Where to export scheduler comparison tables and figures.",
+    )
+    scheduler_visualize_parser.add_argument(
+        "--starvation-threshold",
+        type=int,
+        default=20,
+        help="Starvation threshold passed to the aging policy.",
+    )
+    scheduler_visualize_parser.add_argument(
+        "--skip-timeline",
+        action="store_true",
+        help="Skip generating the scheduling timeline figure to speed up iteration.",
+    )
+
     pipeline_parser = subparsers.add_parser("pipeline")
     pipeline_parser.add_argument(
         "--classifier-config",
@@ -96,6 +134,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "classifier":
         run_classifier_training(args.config)
+        return
+
+    if args.command == "classifier-ablation":
+        run_classifier_ablations(args.config)
         return
 
     if args.command == "scheduler":
@@ -134,6 +176,39 @@ def main(argv: Sequence[str] | None = None) -> None:
             f"[scheduler-dataset] exported report to: {args.output_dir / 'dataset_report.json'}"
         )
         print(f"[scheduler-dataset] split strategy: {prepared.report['split_strategy']}")
+        return
+
+    if args.command == "scheduler-visualize":
+        comparison_path = args.output_dir / "policy_comparison.csv"
+        comparison = export_policy_comparison(
+            data_path=args.data,
+            output_path=comparison_path,
+            starvation_threshold=args.starvation_threshold,
+        )
+        comparison_figure_path = export_policy_comparison_figure(
+            comparison_csv_path=comparison_path,
+            output_path=args.output_dir / "policy_comparison.png",
+        )
+        timeline_figure_path = None
+        if not args.skip_timeline:
+            timeline_figure_path = export_policy_timeline_figure(
+                data_path=args.data,
+                output_path=args.output_dir / "policy_timeline.png",
+                starvation_threshold=args.starvation_threshold,
+            )
+        print(f"[scheduler-visualize] exported comparison to: {comparison_path}")
+        print(
+            f"[scheduler-visualize] exported comparison figure to: {comparison_figure_path}"
+        )
+        if timeline_figure_path is not None:
+            print(
+                f"[scheduler-visualize] exported timeline figure to: {timeline_figure_path}"
+            )
+        else:
+            print("[scheduler-visualize] skipped timeline figure generation")
+        print(
+            f"[scheduler-visualize] compared policies: {', '.join(comparison['policy'].tolist())}"
+        )
         return
 
     run_pipeline(args.classifier_config, args.scheduler_config)

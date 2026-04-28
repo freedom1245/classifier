@@ -2,8 +2,8 @@ dataset_config: configs/dataset.yaml
 scheduler_dataset_dir: data/scheduler_processed
 classifier_output_dir: outputs/classifier
 algorithm: dqn
-episode_count: 40
-max_steps_per_episode: 1500
+episode_count: 2
+max_steps_per_episode: 200
 train_event_window: 12000
 valid_event_window: 6000
 random_state: 42
@@ -38,4 +38,4 @@ reward_weights:
   fifo_mixed_pressure_penalty: 2.5
   low_priority_service_bonus: 1.0
   low_queue_reduction_bonus: 0.75
-output_dir: outputs/scheduler
+output_dir: outputs/scheduler_smoke6

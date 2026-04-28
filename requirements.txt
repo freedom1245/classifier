@@ -1,4 +1,5 @@
 PyYAML>=6.0
 pandas>=2.0
 scikit-learn>=1.4
+matplotlib>=3.8
 torch>=2.2

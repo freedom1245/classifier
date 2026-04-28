@@ -89,6 +89,86 @@ def test_attach_priority_label_honors_configurable_thresholds() -> None:
     assert labeled.loc[1, "priority_label"] == "medium"
 
 
+def test_attach_priority_label_supports_component_scoring() -> None:
+    frame = pd.DataFrame(
+        {
+            "business_value": [100, 20, 5],
+            "business_domain": ["electronics", "archive", "archive"],
+            "user_level": ["vip", "normal", "normal"],
+            "queue_wait_time": [9, 2, 0],
+            "deadline_gap": [0.5, 4.0, 8.0],
+            "retry_count": [1, 0, 0],
+            "is_peak_hour": [1, 0, 0],
+            "dependency_count": [5, 1, 0],
+            "consistency_risk": [0.9, 0.2, 0.1],
+            "event_type": ["purchase", "view", "view"],
+            "estimated_sync_cost": [1.0, 4.0, 9.0],
+            "source_load": [0.2, 0.5, 0.9],
+            "db_load": [0.3, 0.5, 0.9],
+        }
+    )
+
+    labeled = attach_priority_label(
+        frame,
+        labeling_config={
+            "priority_score": {
+                "components": {
+                    "business_importance": {
+                        "weight": 0.4,
+                        "numeric_weights": {"business_value": 0.75},
+                        "categorical_weights": {"business_domain": 0.15, "user_level": 0.10},
+                        "invert_numeric": [],
+                        "hot_values": {
+                            "business_domain": ["electronics"],
+                            "user_level": ["vip"],
+                        },
+                    },
+                    "timeliness": {
+                        "weight": 0.3,
+                        "numeric_weights": {
+                            "queue_wait_time": 0.45,
+                            "deadline_gap": 0.35,
+                            "retry_count": 0.10,
+                            "is_peak_hour": 0.10,
+                        },
+                        "invert_numeric": ["deadline_gap"],
+                        "categorical_weights": {},
+                        "hot_values": {},
+                    },
+                    "dependency_impact": {
+                        "weight": 0.2,
+                        "numeric_weights": {
+                            "dependency_count": 0.6,
+                            "consistency_risk": 0.4,
+                        },
+                        "categorical_weights": {"event_type": 1.0},
+                        "invert_numeric": [],
+                        "hot_values": {"event_type": ["purchase"]},
+                    },
+                    "execution_feasibility": {
+                        "weight": 0.1,
+                        "numeric_weights": {
+                            "estimated_sync_cost": 0.7,
+                            "source_load": 0.15,
+                            "db_load": 0.15,
+                        },
+                        "invert_numeric": ["estimated_sync_cost", "source_load", "db_load"],
+                        "categorical_weights": {},
+                        "hot_values": {},
+                    },
+                },
+                "thresholds": {
+                    "medium": 0.34,
+                    "high": 0.50,
+                },
+            }
+        },
+    )
+
+    assert labeled.loc[0, "priority_label"] == "high"
+    assert labeled.loc[2, "priority_label"] == "low"
+
+
 def test_encode_dataset_produces_train_valid_test_tensors() -> None:
     frame = pd.DataFrame(
         {

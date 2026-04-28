@@ -1,0 +1,5 @@
+{
+  "data_path": "D:\\Code\\Python\\data\\scheduler_processed\\test.csv",
+  "starvation_threshold": 20,
+  "data_mtime_ns": 1777295228815039400
+}
