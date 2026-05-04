@@ -15,8 +15,10 @@ class QueueManager:
             "low": deque(),
         }
     )
+    deferred_low_queue: deque[CDCEvent] = field(default_factory=deque)
     wait_offset: int = 0
     size: int = 0
+    deferred_size: int = 0
     relative_wait_sum: float = 0.0
     _deadline_missed: int = 0
 
@@ -38,6 +40,11 @@ class QueueManager:
         self.relative_wait_sum += event.wait_steps
         if self._is_event_deadline_missed(event):
             self._deadline_missed += 1
+
+    def push_deferred_low(self, event: CDCEvent) -> None:
+        event.wait_steps -= self.wait_offset
+        self.deferred_low_queue.append(event)
+        self.deferred_size += 1
 
     def _is_event_deadline_missed(self, event: CDCEvent) -> bool:
         if event.deadline_step is None:
@@ -74,6 +81,20 @@ class QueueManager:
         if not queue:
             return None
         return queue[0]
+
+    def peek_deferred_low(self) -> CDCEvent | None:
+        if not self.deferred_low_queue:
+            return None
+        return self.deferred_low_queue[0]
+
+    def release_deferred_low(self, max_count: int) -> int:
+        released = 0
+        while self.deferred_low_queue and released < max_count:
+            event = self.deferred_low_queue.popleft()
+            self.deferred_size -= 1
+            self.push(event)
+            released += 1
+        return released
 
     def pop_fifo(self) -> CDCEvent | None:
         candidates: list[tuple[int, str]] = []
@@ -148,6 +169,14 @@ class QueueManager:
             for priority, queue in self.priority_queues.items()
         }
 
+    def deferred_low_count(self) -> int:
+        return self.deferred_size
+
+    def max_deferred_low_wait_steps(self) -> int:
+        if not self.deferred_low_queue:
+            return 0
+        return self.effective_wait_steps(self.deferred_low_queue[0])
+
     def average_wait_steps(self) -> float:
         if self.size == 0:
             return 0.0
@@ -157,7 +186,6 @@ class QueueManager:
         queue = self.priority_queues.get(priority)
         if not queue:
             return 0
-        # 同一优先级队列按到达顺序入队，队首等待时间最大。
         return self.effective_wait_steps(queue[0])
 
     def __len__(self) -> int:

@@ -1,8 +1,6 @@
 import pandas as pd
 
 
-# 默认标签规则采用“一级指标 + 二级特征”的层次化结构，
-# 这样既便于论文表述，也便于后续做权重敏感性分析。
 DEFAULT_LABELING_CONFIG = {
     "priority_score": {
         "components": {
@@ -137,7 +135,6 @@ def _merged_labeling_config(labeling_config: dict | None) -> dict:
                     target["hot_values"][column] = list(values)
         return merged
 
-    # 兼容旧版“扁平字段加权”配置，避免历史配置文件直接失效。
     legacy_component = merged["priority_score"]["components"].setdefault(
         "legacy_priority",
         {
@@ -180,7 +177,6 @@ def _build_component_score(frame: pd.DataFrame, component: dict[str, object]) ->
         score += weight_value * _normalized_flag(frame, column, hot_values)
         total_weight += weight_value
 
-    # 先在组件内部归一化，避免某个组件因为子项较多而天然占更大权重。
     if total_weight <= 1e-9:
         return pd.Series(0.0, index=frame.index, dtype="float32")
     return score / total_weight
@@ -191,7 +187,6 @@ def build_priority_score(frame: pd.DataFrame, labeling_config: dict | None = Non
     score = pd.Series(0.0, index=frame.index, dtype="float32")
     total_component_weight = 0.0
 
-    # 最终优先级分数由多个一级指标加权汇总而成。
     for component in config["components"].values():
         component_weight = float(component.get("weight", 0.0))
         if component_weight <= 0:
@@ -207,7 +202,6 @@ def build_priority_score(frame: pd.DataFrame, labeling_config: dict | None = Non
 def attach_priority_label(frame: pd.DataFrame, labeling_config: dict | None = None) -> pd.DataFrame:
     labeled = frame.copy()
     if "priority_label" in labeled.columns:
-        # 如果数据源已经带标签，则优先保留，避免重复覆盖人工或上游标签。
         labeled["priority_label"] = (
             labeled["priority_label"].fillna("medium").astype(str).str.lower()
         )
@@ -217,7 +211,6 @@ def attach_priority_label(frame: pd.DataFrame, labeling_config: dict | None = No
     thresholds = config["thresholds"]
     priority_score = build_priority_score(labeled, labeling_config=labeling_config)
     labeled["priority_score"] = priority_score
-    # 采用双阈值把连续分数映射成 high / medium / low 三分类标签。
     labeled["priority_label"] = "low"
     labeled.loc[priority_score >= float(thresholds["medium"]), "priority_label"] = "medium"
     labeled.loc[priority_score >= float(thresholds["high"]), "priority_label"] = "high"

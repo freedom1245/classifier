@@ -9,9 +9,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from .env import SchedulerEnv
 from .event import CDCEvent
-from .policies import aging_policy, fifo_policy, strict_priority_policy
-from .queue_manager import QueueManager
+
+ARRIVAL_STEP_TIME_UNIT_SECONDS = 1.0
+COMPARISON_CACHE_VERSION = 3
 
 
 @dataclass
@@ -24,24 +26,48 @@ class SchedulerMetrics:
     fairness_index: float
 
 
+def _build_arrival_steps(frame: pd.DataFrame) -> list[int]:
+    if "timestamp" not in frame.columns:
+        return list(range(len(frame)))
+
+    parsed_timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    if parsed_timestamps.isna().any():
+        return list(range(len(frame)))
+
+    base_timestamp = parsed_timestamps.iloc[0]
+    delta_seconds = (parsed_timestamps - base_timestamp).dt.total_seconds()
+    return (
+        (delta_seconds / ARRIVAL_STEP_TIME_UNIT_SECONDS)
+        .round()
+        .clip(lower=0)
+        .astype(int)
+        .tolist()
+    )
+
+
 def load_scheduler_events(data_path: Path) -> list[CDCEvent]:
     frame = pd.read_csv(data_path)
     if "timestamp" in frame.columns:
-        # 调度实验必须尊重事件到达顺序，因此这里强制按时间排序。
-        frame = frame.sort_values("timestamp").reset_index(drop=True)
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        frame = frame.sort_values("timestamp", kind="stable").reset_index(drop=True)
+
+    arrival_steps = _build_arrival_steps(frame)
 
     events: list[CDCEvent] = []
     for index, row in frame.iterrows():
         deadline_value = row["deadline"] if "deadline" in frame.columns else None
         deadline_step = None if pd.isna(deadline_value) else int(math.ceil(float(deadline_value)))
-        # 当前仿真里 estimated_sync_cost 被近似映射为离散 service_steps。
         service_steps = max(1, int(math.ceil(float(row.get("estimated_sync_cost", 1.0)))))
+        arrival_hour = None
+        if "timestamp" in frame.columns and pd.notna(row.get("timestamp")):
+            arrival_hour = int(row["timestamp"].hour)
         events.append(
             CDCEvent(
                 event_id=str(row.get("event_id", f"event_{index}")),
                 priority=str(row.get("priority_label", "low")),
-                arrival_step=index,
+                arrival_step=arrival_steps[index],
                 sync_cost=float(row.get("estimated_sync_cost", 1.0)),
+                arrival_hour=arrival_hour,
                 deadline_step=deadline_step,
                 service_steps=service_steps,
             )
@@ -49,17 +75,15 @@ def load_scheduler_events(data_path: Path) -> list[CDCEvent]:
     return events
 
 
-def _select_event(
-    queue_manager: QueueManager,
-    policy_name: str,
-    starvation_threshold: int,
-) -> CDCEvent | None:
+def _select_action(policy_name: str, state) -> int:
     if policy_name == "fifo":
-        return fifo_policy(queue_manager)
+        return 0
     if policy_name == "strict_priority":
-        return strict_priority_policy(queue_manager)
+        return 1
     if policy_name == "aging":
-        return aging_policy(queue_manager, starvation_threshold=starvation_threshold)
+        if state.priority_counts.get("high", 0) > 0:
+            return 4
+        return 2
     raise ValueError(f"Unsupported policy: {policy_name}")
 
 
@@ -76,54 +100,35 @@ def simulate_policy(
     events: list[CDCEvent],
     policy_name: str,
     starvation_threshold: int = 5,
+    env_kwargs: dict[str, object] | None = None,
 ) -> SchedulerMetrics:
-    # 这里是“固定策略”的离线重放仿真，用来和 RL 策略做同口径比较。
-    queue_manager = QueueManager()
-    current_step = 0
-    next_index = 0
+    merged_env_kwargs = {"starvation_threshold": starvation_threshold}
+    if env_kwargs:
+        merged_env_kwargs.update(env_kwargs)
+    env = SchedulerEnv(
+        events=events,
+        **merged_env_kwargs,
+    )
+    state = env.reset()
     completed = 0
     delay_totals: list[int] = []
     high_delay_totals: list[int] = []
     per_priority_delay: dict[str, list[int]] = {"high": [], "medium": [], "low": []}
 
-    while next_index < len(events) or len(queue_manager) > 0:
-        while next_index < len(events) and events[next_index].arrival_step <= current_step:
-            event = events[next_index]
-            queue_manager.push(
-                CDCEvent(
-                    event_id=event.event_id,
-                    priority=event.priority,
-                    arrival_step=event.arrival_step,
-                    sync_cost=event.sync_cost,
-                    deadline_step=event.deadline_step,
-                    wait_steps=0,
-                    service_steps=event.service_steps,
-                )
-            )
-            next_index += 1
-
-        if len(queue_manager) == 0:
-            current_step = events[next_index].arrival_step
-            continue
-
-        event = _select_event(
-            queue_manager,
-            policy_name=policy_name,
-            starvation_threshold=starvation_threshold,
-        )
-        if event is None:
-            current_step += 1
-            continue
-
-        delay = current_step - event.arrival_step
-        delay_totals.append(delay)
-        per_priority_delay[event.priority].append(delay)
-        if event.priority == "high":
-            high_delay_totals.append(delay)
-        completed += 1
-
-        queue_manager.increment_wait_steps(event.service_steps)
-        current_step += event.service_steps
+    evaluation_budget = max(len(events) * 50, 10000)
+    for _ in range(evaluation_budget):
+        action = _select_action(policy_name, state)
+        state, _, done, info = env.step(action)
+        priority = info.get("processed_priority")
+        if priority is not None:
+            delay = int(info.get("processed_delay_steps", 0))
+            delay_totals.append(delay)
+            per_priority_delay[priority].append(delay)
+            if priority == "high":
+                high_delay_totals.append(delay)
+            completed += 1
+        if done:
+            break
 
     average_delay_steps = sum(delay_totals) / max(len(delay_totals), 1)
     high_average_delay_steps = sum(high_delay_totals) / max(len(high_delay_totals), 1)
@@ -135,7 +140,7 @@ def simulate_policy(
             sum(per_priority_delay["low"]) / max(len(per_priority_delay["low"]), 1),
         ]
     )
-    throughput = completed / max(current_step, 1)
+    throughput = completed / max(env.current_step, 1)
     return SchedulerMetrics(
         throughput=throughput,
         average_delay_steps=average_delay_steps,
@@ -149,6 +154,7 @@ def simulate_policy(
 def compare_policies(
     events: list[CDCEvent],
     starvation_threshold: int = 5,
+    env_kwargs: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     rows = []
     for policy_name in ("fifo", "strict_priority", "aging"):
@@ -156,6 +162,7 @@ def compare_policies(
             events,
             policy_name=policy_name,
             starvation_threshold=starvation_threshold,
+            env_kwargs=env_kwargs,
         )
         rows.append(
             {
@@ -179,6 +186,7 @@ def _is_comparison_cache_valid(
     data_path: Path,
     output_path: Path,
     starvation_threshold: int,
+    env_kwargs: dict[str, object] | None = None,
 ) -> bool:
     metadata_path = _cache_metadata_path(output_path)
     if not output_path.exists() or not metadata_path.exists():
@@ -188,8 +196,10 @@ def _is_comparison_cache_valid(
     except (OSError, json.JSONDecodeError):
         return False
     return (
-        metadata.get("data_path") == str(data_path.resolve())
+        metadata.get("cache_version") == COMPARISON_CACHE_VERSION
+        and metadata.get("data_path") == str(data_path.resolve())
         and metadata.get("starvation_threshold") == starvation_threshold
+        and metadata.get("env_kwargs") == (env_kwargs or {})
         and metadata.get("data_mtime_ns") == data_path.stat().st_mtime_ns
     )
 
@@ -198,11 +208,14 @@ def _write_comparison_cache_metadata(
     data_path: Path,
     output_path: Path,
     starvation_threshold: int,
+    env_kwargs: dict[str, object] | None = None,
 ) -> None:
     metadata_path = _cache_metadata_path(output_path)
     metadata = {
+        "cache_version": COMPARISON_CACHE_VERSION,
         "data_path": str(data_path.resolve()),
         "starvation_threshold": starvation_threshold,
+        "env_kwargs": env_kwargs or {},
         "data_mtime_ns": data_path.stat().st_mtime_ns,
     }
     metadata_path.write_text(
@@ -215,15 +228,30 @@ def export_policy_comparison(
     data_path: Path,
     output_path: Path,
     starvation_threshold: int = 5,
+    env_kwargs: dict[str, object] | None = None,
 ) -> pd.DataFrame:
-    if _is_comparison_cache_valid(data_path, output_path, starvation_threshold):
+    if _is_comparison_cache_valid(
+        data_path,
+        output_path,
+        starvation_threshold,
+        env_kwargs=env_kwargs,
+    ):
         return pd.read_csv(output_path)
 
     events = load_scheduler_events(data_path)
-    comparison = compare_policies(events, starvation_threshold=starvation_threshold)
+    comparison = compare_policies(
+        events,
+        starvation_threshold=starvation_threshold,
+        env_kwargs=env_kwargs,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     comparison.to_csv(output_path, index=False)
-    _write_comparison_cache_metadata(data_path, output_path, starvation_threshold)
+    _write_comparison_cache_metadata(
+        data_path,
+        output_path,
+        starvation_threshold,
+        env_kwargs=env_kwargs,
+    )
     return comparison
 
 
@@ -244,6 +272,7 @@ def export_policy_comparison_figure(
         "aging": "#10B981",
         "dqn": "#F59E0B",
         "ppo": "#8B5CF6",
+        "double_dqn": "#14B8A6",
     }
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))

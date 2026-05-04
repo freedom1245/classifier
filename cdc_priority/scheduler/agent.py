@@ -119,6 +119,33 @@ class DQNAgent:
 
 
 @dataclass
+class DoubleDQNAgent(DQNAgent):
+    def optimize(self) -> float | None:
+        if len(self.replay_buffer) < self.batch_size:
+            return None
+
+        batch = random.sample(self.replay_buffer, self.batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        states_tensor = torch.tensor(states, dtype=torch.float32, device=self.device)
+        actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1)
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+        next_states_tensor = torch.tensor(next_states, dtype=torch.float32, device=self.device)
+        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
+
+        current_q = self.policy_network(states_tensor).gather(1, actions_tensor).squeeze(1)
+        with torch.no_grad():
+            next_policy_actions = self.policy_network(next_states_tensor).argmax(dim=1, keepdim=True)
+            next_q = self.target_network(next_states_tensor).gather(1, next_policy_actions).squeeze(1)
+            target_q = rewards_tensor + self.gamma * next_q * (1.0 - dones_tensor)
+
+        loss = nn.functional.mse_loss(current_q, target_q)
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.optimizer.step()
+        return float(loss.item())
+
+
+@dataclass
 class PPOAgent:
     action_count: int
     state_dim: int

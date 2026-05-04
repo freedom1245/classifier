@@ -20,6 +20,24 @@ def compute_reward(
     fairness_delta = state.fairness_index() - previous_state.fairness_index()
     fairness_reward = reward_weights.get("fairness_weight", 0.5) * fairness_delta
 
+    deferred_low_delta = (
+        state.max_deferred_low_wait_steps - previous_state.max_deferred_low_wait_steps
+    )
+    deferred_low_penalty = -reward_weights.get("deferred_low_weight", 0.05) * max(
+        deferred_low_delta, 0.0
+    )
+    off_peak_release_reward = reward_weights.get("off_peak_release_weight", 0.1) * max(
+        previous_state.deferred_low_count - state.deferred_low_count,
+        0.0,
+    ) * state.is_off_peak
+
     deadline_penalty = -reward_weights.get("deadline_weight", 2.0) if deadline_missed else 0.0
 
-    return throughput + delay_reward + fairness_reward + deadline_penalty
+    return (
+        throughput
+        + delay_reward
+        + fairness_reward
+        + deferred_low_penalty
+        + off_peak_release_reward
+        + deadline_penalty
+    )

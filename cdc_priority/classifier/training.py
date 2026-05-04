@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from ..data.dataset_builder import build_dataset_from_config
 from ..settings import default_settings, load_yaml_config
-from ..utils import ensure_directory
+from ..utils import ensure_directory, resolve_run_output_dir
 from .baselines import evaluate_baseline_models
 from .evaluate import (
     build_classification_metrics,
@@ -77,7 +77,6 @@ def _build_model(config_values: dict, encoded: EncodedDataset) -> nn.Module:
     num_classes = len(encoded.artifacts.label_encoder.classes_)
     hidden_dim = int(config_values.get("hidden_dim", 256))
     dropout = float(config_values.get("dropout", 0.3))
-    # 这里统一做模型分发，保证不同结构共享同一套训练/评估流程。
     if model_variant == "mlp":
         input_dim = (
             encoded.train.categorical.size(1)
@@ -126,7 +125,6 @@ def _evaluate_model(
     labels_all: list[int] = []
     predictions_all: list[int] = []
 
-    # 验证/测试阶段不需要梯度，避免额外显存和计算开销。
     with torch.no_grad():
         for categorical_inputs, numeric_inputs, labels in data_loader:
             categorical_inputs = categorical_inputs.to(device)
@@ -154,7 +152,6 @@ def _save_artifacts(
     artifact: dict[str, object],
 ) -> None:
     ensure_directory(output_dir)
-    # checkpoint 同时保存模型参数和特征编码元数据，方便后续推理或复现实验。
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "metadata": artifact,
@@ -168,6 +165,20 @@ def _save_artifacts(
     torch.save(checkpoint, output_dir / "classifier_model.pt")
     with (output_dir / "classifier_report.json").open("w", encoding="utf-8") as file:
         json.dump(artifact, file, ensure_ascii=True, indent=2)
+
+
+def _resolve_training_output_dir(
+    config_values: dict,
+    project_root: Path,
+    run_name_override: str | None = None,
+) -> tuple[Path, str]:
+    base_output_dir = _resolve_path(project_root, config_values["output_dir"])
+    configured_run_name = str(config_values.get("run_name", "")).strip() or None
+    return resolve_run_output_dir(
+        base_dir=base_output_dir,
+        run_name=run_name_override or configured_run_name,
+        prefix="classifier",
+    )
 
 
 def _train_prepared_dataset(
@@ -205,7 +216,6 @@ def _train_prepared_dataset(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = _build_model(config_values, encoded).to(device)
     label_counts = torch.bincount(encoded.train.labels)
-    # 使用类别权重缓解样本分布不均衡，避免模型过度偏向多数类。
     class_weights = label_counts.sum() / label_counts.clamp(min=1)
     class_weights = class_weights / class_weights.mean()
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
@@ -270,7 +280,6 @@ def _train_prepared_dataset(
             f"valid_acc={val_acc:.4f}"
         )
 
-        # 优先按验证集准确率挑最优模型，准确率相同再比较验证损失。
         improved = (val_acc > best_val_acc) or (
             abs(val_acc - best_val_acc) <= 1e-9 and val_loss < best_val_loss
         )
@@ -289,7 +298,6 @@ def _train_prepared_dataset(
                 break
 
     if best_state is not None:
-        # 训练结束后回滚到验证集表现最好的那一轮参数。
         model.load_state_dict(best_state)
 
     valid_loss, valid_acc, valid_labels, valid_predictions = _evaluate_model(
@@ -334,6 +342,8 @@ def _train_prepared_dataset(
         "attention_dim": int(config_values.get("attention_dim", 128)),
         "attention_heads": int(config_values.get("attention_heads", 8)),
         "attention_layers": int(config_values.get("attention_layers", 2)),
+        "run_name": output_dir.name,
+        "output_dir": str(output_dir),
         "learning_rate": float(config_values.get("lr", config_values.get("learning_rate", 1e-3))),
         "weight_decay": float(config_values.get("weight_decay", 1e-4)),
         "validation": {
@@ -363,7 +373,6 @@ def _train_prepared_dataset(
         },
     }
     if save_artifacts:
-        # 训练产物不仅保存主模型结果，也同步导出传统机器学习基线对比。
         export_baseline_comparison_csv(
             baseline_rows,
             output_dir / "baseline_comparison.csv",
@@ -374,14 +383,24 @@ def _train_prepared_dataset(
     return artifact
 
 
-def _run_configured_dataset_training(config_values: dict, project_root: Path) -> None:
+def _run_configured_dataset_training(
+    config_values: dict,
+    project_root: Path,
+    run_name_override: str | None = None,
+) -> Path:
     dataset_config_path = _resolve_path(project_root, config_values["dataset_config"])
-    output_dir = ensure_directory(_resolve_path(project_root, config_values["output_dir"]))
+    output_dir, resolved_run_name = _resolve_training_output_dir(
+        config_values,
+        project_root,
+        run_name_override=run_name_override,
+    )
     random_state = int(config_values.get("random_state", 42))
     _set_seed(random_state)
 
     print("[classifier] source: configured_dataset")
     print(f"[classifier] dataset config: {dataset_config_path}")
+    print(f"[classifier] run_name: {resolved_run_name}")
+    print(f"[classifier] output_dir: {output_dir}")
     prepared = build_dataset_from_config(dataset_config_path, random_state=random_state)
     _train_prepared_dataset(
         prepared=prepared,
@@ -391,10 +410,10 @@ def _run_configured_dataset_training(config_values: dict, project_root: Path) ->
         run_label="configured_dataset",
         save_artifacts=True,
     )
+    return output_dir
 
 
 def _make_ablation_variants(schema) -> list[dict[str, object]]:
-    # 消融按“时间特征 / 业务特征 / 成本特征”三组做，便于和论文分析对应。
     return [
         {
             "name": "full_model",
@@ -431,19 +450,25 @@ def _make_ablation_variants(schema) -> list[dict[str, object]]:
     ]
 
 
-def run_classifier_ablations(config_path: Path) -> None:
+def run_classifier_ablations(config_path: Path, run_name: str | None = None) -> Path:
     settings = default_settings()
     config = load_yaml_config(config_path)
     config_values = config.values
     project_root = settings.project_root
     dataset_config_path = _resolve_path(project_root, config_values["dataset_config"])
-    output_dir = ensure_directory(_resolve_path(project_root, config_values["output_dir"]))
+    output_dir, resolved_run_name = _resolve_training_output_dir(
+        config_values,
+        project_root,
+        run_name_override=run_name,
+    )
     ablation_output_dir = ensure_directory(output_dir / "ablations")
     random_state = int(config_values.get("random_state", 42))
     _set_seed(random_state)
 
     print(f"[classifier-ablation] config: {config.path}")
     print(f"[classifier-ablation] dataset config: {dataset_config_path}")
+    print(f"[classifier-ablation] run_name: {resolved_run_name}")
+    print(f"[classifier-ablation] output_dir: {output_dir}")
     prepared = build_dataset_from_config(dataset_config_path, random_state=random_state)
     rows: list[dict[str, object]] = []
 
@@ -451,7 +476,6 @@ def run_classifier_ablations(config_path: Path) -> None:
         variant_name = str(variant["name"])
         removed_columns = list(variant["removed_columns"])
         variant_prepared = deepcopy(prepared)
-        # 这里不重新切分数据，只在同一划分上裁剪特征，确保消融实验口径一致。
         variant_prepared.schema.categorical_columns = [
             column
             for column in variant_prepared.schema.categorical_columns
@@ -487,16 +511,20 @@ def run_classifier_ablations(config_path: Path) -> None:
     with (output_dir / "ablation_results.json").open("w", encoding="utf-8") as file:
         json.dump(rows, file, ensure_ascii=True, indent=2)
     print(f"[classifier-ablation] saved summary to: {output_dir / 'ablation_results.csv'}")
+    return output_dir
 
 
-def run_classifier_training(config_path: Path) -> None:
+def run_classifier_training(config_path: Path, run_name: str | None = None) -> Path:
     settings = default_settings()
     config = load_yaml_config(config_path)
     source = config.values.get("source", "configured_dataset")
 
     print(f"[classifier] config: {config.path}")
     if source == "configured_dataset":
-        _run_configured_dataset_training(config.values, settings.project_root)
-        return
+        return _run_configured_dataset_training(
+            config.values,
+            settings.project_root,
+            run_name_override=run_name,
+        )
 
     raise ValueError(f"Unsupported classifier source: {source}")

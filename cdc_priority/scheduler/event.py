@@ -7,6 +7,7 @@ class CDCEvent:
     priority: str
     arrival_step: int
     sync_cost: float
+    arrival_hour: int | None = None
     deadline_step: int | None = None
     wait_steps: int = 0
     service_steps: int = 1

@@ -21,6 +21,13 @@ ppo_max_grad_norm: 0.5
 queue_capacity: 10000
 service_rate: 128
 starvation_threshold: 20
+defer_low_priority: true
+low_release_batch_size: 16
+low_release_load_threshold: 0.35
+low_release_high_queue_threshold: 8
+low_force_release_wait_steps: 600
+off_peak_start_hour: 0
+off_peak_end_hour: 6
 gamma: 0.99
 learning_rate: 0.0003
 batch_size: 64
@@ -33,5 +40,7 @@ reward_weights:
   throughput_weight: 1.0
   delay_weight: 0.1
   fairness_weight: 0.5
+  deferred_low_weight: 0.05
+  off_peak_release_weight: 0.1
   deadline_weight: 2.0
 output_dir: outputs/scheduler_ppo

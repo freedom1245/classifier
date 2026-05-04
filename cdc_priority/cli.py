@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=settings.configs_dir / "classifier.yaml",
         help="Classifier YAML config path.",
     )
+    classifier_parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional output subdirectory name for this classifier run.",
+    )
 
     classifier_ablation_parser = subparsers.add_parser("classifier-ablation")
     classifier_ablation_parser.add_argument(
@@ -38,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=settings.configs_dir / "classifier.yaml",
         help="Classifier YAML config path.",
     )
+    classifier_ablation_parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional output subdirectory name for this ablation run.",
+    )
 
     scheduler_parser = subparsers.add_parser("scheduler")
     scheduler_parser.add_argument(
@@ -45,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=settings.configs_dir / "scheduler.yaml",
         help="Scheduler YAML config path.",
+    )
+    scheduler_parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional output subdirectory name for this scheduler run.",
     )
 
     dataset_parser = subparsers.add_parser("dataset")
@@ -120,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=settings.configs_dir / "scheduler.yaml",
         help="Scheduler YAML config path.",
     )
+    pipeline_parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional shared output subdirectory name for classifier, scheduler, and pipeline reports.",
+    )
     return parser
 
 
@@ -127,15 +151,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
 
     if args.command == "classifier":
-        run_classifier_training(args.config)
+        run_classifier_training(args.config, run_name=args.run_name)
         return
 
     if args.command == "classifier-ablation":
-        run_classifier_ablations(args.config)
+        run_classifier_ablations(args.config, run_name=args.run_name)
         return
 
     if args.command == "scheduler":
-        run_scheduler_training(args.config)
+        run_scheduler_training(args.config, run_name=args.run_name)
         return
 
     if args.command == "dataset":
@@ -192,4 +216,4 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         return
 
-    run_pipeline(args.classifier_config, args.scheduler_config)
+    run_pipeline(args.classifier_config, args.scheduler_config, run_name=args.run_name)

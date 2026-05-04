@@ -20,8 +20,6 @@ def effective_priority_rank(event: CDCEvent, starvation_threshold: int, wait_ste
     boosted_rank = event.priority_rank
     effective_wait = event.wait_steps if wait_steps is None else wait_steps
     if starvation_threshold > 0:
-        # aging 不再只是“轻微提权”，而是随着等待时间分段增强，
-        # 让低优事件在明显饿死时能够真正压过高优队列。
         boosted_rank += min(effective_wait // starvation_threshold, 3)
     return min(boosted_rank, 4)
 

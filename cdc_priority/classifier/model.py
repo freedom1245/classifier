@@ -41,7 +41,6 @@ class EmbeddingMLPClassifier(nn.Module):
         numeric_projection_dim: int = 64,
     ) -> None:
         super().__init__()
-        # 每个类别字段各自维护 embedding，避免把类别编号误当成连续数值。
         self.embedding_layers = nn.ModuleList(
             [
                 nn.Embedding(vocab_size, min(embedding_dim, max(4, vocab_size // 2)))
@@ -62,7 +61,6 @@ class EmbeddingMLPClassifier(nn.Module):
         embedding_output_dim = sum(
             embedding.embedding_dim for embedding in self.embedding_layers
         )
-        # 类别 embedding 与数值投影拼接后，再交给 MLP 做最终分类。
         fusion_dim = embedding_output_dim + self.numeric_projection_dim
         self.network = nn.Sequential(
             nn.Linear(fusion_dim, hidden_dim),
@@ -82,7 +80,6 @@ class EmbeddingMLPClassifier(nn.Module):
         features: list[torch.Tensor] = []
 
         if self.embedding_layers:
-            # 每一列类别特征单独嵌入，再在特征维上拼接。
             embedded_columns = [
                 embedding(categorical_inputs[:, index])
                 for index, embedding in enumerate(self.embedding_layers)
@@ -113,7 +110,6 @@ class AttentionTabularClassifier(nn.Module):
         attention_layers: int = 2,
     ) -> None:
         super().__init__()
-        # 方案 B：把每个类别特征看成一个 token，数值块也投影成一个 token。
         self.embedding_layers = nn.ModuleList(
             [
                 nn.Embedding(vocab_size, min(embedding_dim, max(4, vocab_size // 2)))
@@ -140,7 +136,6 @@ class AttentionTabularClassifier(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        # Transformer 负责建模“特征与特征之间”的交互关系。
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=attention_layers,
@@ -173,7 +168,6 @@ class AttentionTabularClassifier(nn.Module):
         if not tokens:
             raise ValueError("AttentionTabularClassifier requires categorical or numeric features.")
 
-        # 对 token 序列做自注意力编码，再使用均值池化得到样本级表示。
         token_tensor = torch.cat(tokens, dim=1)
         encoded_tokens = self.encoder(token_tensor)
         pooled = encoded_tokens.mean(dim=1)

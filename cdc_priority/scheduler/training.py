@@ -5,8 +5,8 @@ import random
 import torch
 
 from ..settings import default_settings, load_yaml_config
-from ..utils import ensure_directory
-from .agent import DQNAgent, PPOAgent
+from ..utils import ensure_directory, resolve_run_output_dir
+from .agent import DQNAgent, DoubleDQNAgent, PPOAgent
 from .env import SchedulerEnv
 from .evaluate import (
     append_policy_result,
@@ -18,6 +18,42 @@ from .event import CDCEvent
 
 
 ACTION_COUNT = len(SchedulerEnv.ACTION_NAMES)
+
+
+def _build_env_kwargs(config_values: dict[str, object], reward_weights: dict[str, float]) -> dict[str, object]:
+    return {
+        "reward_weights": reward_weights,
+        "starvation_threshold": int(config_values.get("starvation_threshold", 50)),
+        "queue_capacity": int(config_values.get("queue_capacity", 10000)),
+        "defer_low_priority": bool(config_values.get("defer_low_priority", True)),
+        "low_release_batch_size": int(config_values.get("low_release_batch_size", 16)),
+        "low_release_load_threshold": float(config_values.get("low_release_load_threshold", 0.35)),
+        "low_release_high_queue_threshold": int(
+            config_values.get("low_release_high_queue_threshold", 8)
+        ),
+        "low_force_release_wait_steps": int(
+            config_values.get("low_force_release_wait_steps", 600)
+        ),
+        "off_peak_start_hour": int(config_values.get("off_peak_start_hour", 0)),
+        "off_peak_end_hour": int(config_values.get("off_peak_end_hour", 6)),
+    }
+
+
+def _resolve_training_output_dir(
+    config_values: dict[str, object],
+    project_root: Path,
+    run_name_override: str | None = None,
+) -> tuple[Path, str]:
+    base_output_dir = Path(str(config_values["output_dir"]))
+    if not base_output_dir.is_absolute():
+        base_output_dir = project_root / base_output_dir
+    configured_run_name = str(config_values.get("run_name", "")).strip() or None
+    algorithm = str(config_values.get("algorithm", "scheduler")).lower()
+    return resolve_run_output_dir(
+        base_dir=base_output_dir,
+        run_name=run_name_override or configured_run_name,
+        prefix=algorithm,
+    )
 
 
 def _slice_events(
@@ -35,6 +71,7 @@ def _slice_events(
             priority=event.priority,
             arrival_step=event.arrival_step - arrival_base,
             sync_cost=event.sync_cost,
+            arrival_hour=event.arrival_hour,
             deadline_step=event.deadline_step,
             wait_steps=0,
             service_steps=event.service_steps,
@@ -233,15 +270,13 @@ def _is_better_validation_candidate(
 
 def _evaluate_trained_agent(
     events: list[CDCEvent],
-    reward_weights: dict[str, float],
-    starvation_threshold: int,
+    env_kwargs: dict[str, object],
     action_selector,
     policy_name: str,
 ) -> tuple[dict[str, float | int | str], dict[str, int]]:
     env = SchedulerEnv(
         events=events,
-        reward_weights=reward_weights,
-        starvation_threshold=starvation_threshold,
+        **env_kwargs,
     )
     state = env.reset()
     delay_totals: list[int] = []
@@ -253,7 +288,8 @@ def _evaluate_trained_agent(
     }
     completed = 0
 
-    for _ in range(len(events) * 10):
+    evaluation_budget = max(len(events) * 50, 10000)
+    for _ in range(evaluation_budget):
         action = action_selector(state)
         action_counts[SchedulerEnv.ACTION_NAMES[action]] += 1
         state, _, done, info = env.step(action)
@@ -295,11 +331,17 @@ def _evaluate_trained_agent(
     )
 
 
-def run_scheduler_training(config_path: Path) -> None:
+def run_scheduler_training(config_path: Path, run_name: str | None = None) -> Path:
     settings = default_settings()
     config = load_yaml_config(config_path)
-    output_dir = ensure_directory(settings.project_root / config.values["output_dir"])
-    dataset_dir = settings.project_root / config.values["scheduler_dataset_dir"]
+    output_dir, resolved_run_name = _resolve_training_output_dir(
+        config.values,
+        settings.project_root,
+        run_name_override=run_name,
+    )
+    dataset_dir = Path(str(config.values["scheduler_dataset_dir"]))
+    if not dataset_dir.is_absolute():
+        dataset_dir = settings.project_root / dataset_dir
     train_events = load_scheduler_events(dataset_dir / "train.csv")
     valid_events = load_scheduler_events(dataset_dir / "valid.csv")
     test_events = load_scheduler_events(dataset_dir / "test.csv")
@@ -308,6 +350,7 @@ def run_scheduler_training(config_path: Path) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     reward_weights = dict(config.values.get("reward_weights", {}))
     starvation_threshold = int(config.values.get("starvation_threshold", 50))
+    env_kwargs = _build_env_kwargs(config.values, reward_weights)
     max_steps = int(config.values.get("max_steps_per_episode", 500))
     episode_count = int(config.values.get("episode_count", 200))
     target_update_interval = int(config.values.get("target_update_interval", 20))
@@ -326,8 +369,7 @@ def run_scheduler_training(config_path: Path) -> None:
     validation_events = _validation_events(valid_events, valid_event_window)
     valid_env = SchedulerEnv(
         events=validation_events,
-        reward_weights=reward_weights,
-        starvation_threshold=starvation_threshold,
+        **env_kwargs,
     )
     state_dim = len(valid_env.reset().to_vector())
 
@@ -347,6 +389,19 @@ def run_scheduler_training(config_path: Path) -> None:
             hidden_dim=int(config.values.get("ppo_hidden_dim", 128)),
             device=device,
         )
+    elif algorithm == "double_dqn":
+        agent = DoubleDQNAgent(
+            action_count=ACTION_COUNT,
+            state_dim=state_dim,
+            gamma=float(config.values.get("gamma", 0.99)),
+            epsilon=float(config.values.get("epsilon_start", 1.0)),
+            epsilon_end=float(config.values.get("epsilon_end", 0.05)),
+            epsilon_decay=float(config.values.get("epsilon_decay", 0.995)),
+            replay_capacity=int(config.values.get("replay_capacity", 5000)),
+            batch_size=int(config.values.get("batch_size", 64)),
+            learning_rate=float(config.values.get("learning_rate", 1e-3)),
+            device=device,
+        )
     else:
         agent = DQNAgent(
             action_count=ACTION_COUNT,
@@ -363,6 +418,7 @@ def run_scheduler_training(config_path: Path) -> None:
 
     print(f"[scheduler] config: {config.path}")
     print(f"[scheduler] algorithm: {algorithm}")
+    print(f"[scheduler] run_name: {resolved_run_name}")
     print(f"[scheduler] output_dir: {output_dir}")
     print(f"[scheduler] device: {device}")
     print(f"[scheduler] train events: {len(train_events)}")
@@ -379,8 +435,7 @@ def run_scheduler_training(config_path: Path) -> None:
         episode_events = _sample_training_events(train_events, train_event_window, rng)
         train_env = SchedulerEnv(
             events=episode_events,
-            reward_weights=reward_weights,
-            starvation_threshold=starvation_threshold,
+            **env_kwargs,
         )
 
         if algorithm == "ppo":
@@ -463,7 +518,7 @@ def run_scheduler_training(config_path: Path) -> None:
             best_validation_summary = dict(validation_summary)
             best_state = best_candidate
 
-        if algorithm == "dqn":
+        if algorithm in {"dqn", "double_dqn"}:
             agent.decay_epsilon()
 
     if best_state is not None:
@@ -473,7 +528,12 @@ def run_scheduler_training(config_path: Path) -> None:
             agent.policy_network.load_state_dict(best_state)
             agent.update_target_network()
 
-    model_filename = "ppo_agent.pt" if algorithm == "ppo" else "dqn_agent.pt"
+    if algorithm == "ppo":
+        model_filename = "ppo_agent.pt"
+    elif algorithm == "double_dqn":
+        model_filename = "double_dqn_agent.pt"
+    else:
+        model_filename = "dqn_agent.pt"
     model_path = output_dir / model_filename
     if algorithm == "ppo":
         torch.save(
@@ -502,17 +562,17 @@ def run_scheduler_training(config_path: Path) -> None:
         original_epsilon = agent.epsilon
         agent.epsilon = 0.0
         action_selector = lambda state: agent.select_action(state.to_vector())
-        trained_policy_name = "dqn"
+        trained_policy_name = "double_dqn" if algorithm == "double_dqn" else "dqn"
 
     policy_comparison = export_policy_comparison(
         data_path=dataset_dir / "test.csv",
         output_path=output_dir / "policy_comparison.csv",
         starvation_threshold=starvation_threshold,
+        env_kwargs=env_kwargs,
     )
     trained_metrics, action_counts = _evaluate_trained_agent(
         events=test_events,
-        reward_weights=reward_weights,
-        starvation_threshold=starvation_threshold,
+        env_kwargs=env_kwargs,
         action_selector=action_selector,
         policy_name=trained_policy_name,
     )
@@ -524,7 +584,7 @@ def run_scheduler_training(config_path: Path) -> None:
         comparison_csv_path=output_dir / "policy_comparison.csv",
         output_path=output_dir / "policy_comparison.png",
     )
-    if algorithm == "dqn":
+    if algorithm in {"dqn", "double_dqn"}:
         agent.epsilon = original_epsilon
 
     report_path = output_dir / "scheduler_report.json"
@@ -532,6 +592,8 @@ def run_scheduler_training(config_path: Path) -> None:
         json.dumps(
             {
                 "algorithm": algorithm,
+                "run_name": resolved_run_name,
+                "output_dir": str(output_dir),
                 "best_validation_reward": best_reward,
                 "best_validation_summary": best_validation_summary,
                 "history": history,
@@ -549,3 +611,4 @@ def run_scheduler_training(config_path: Path) -> None:
     print(f"[scheduler] saved agent to: {model_path}")
     print(f"[scheduler] saved report to: {report_path}")
     print(f"[scheduler] saved comparison figure to: {comparison_figure_path}")
+    return output_dir

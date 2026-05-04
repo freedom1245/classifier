@@ -8,12 +8,19 @@ import pandas as pd
 from cdc_priority.scheduler.evaluate import (
     export_policy_comparison,
     export_policy_comparison_figure,
+    load_scheduler_events,
     simulate_policy,
 )
-from cdc_priority.scheduler.agent import PPOAgent
+from cdc_priority.scheduler.agent import DoubleDQNAgent, PPOAgent
 from cdc_priority.scheduler.event import CDCEvent
 from cdc_priority.scheduler.reward import compute_reward
-from cdc_priority.scheduler.training import _is_better_validation_candidate
+from cdc_priority.scheduler.training import (
+    _is_better_validation_candidate,
+    run_scheduler_training,
+)
+from cdc_priority.settings import AppSettings
+import json
+import yaml
 from cdc_priority.scheduler.policies import (
     aging_light_policy,
     aging_policy,
@@ -41,7 +48,80 @@ def test_scheduler_env_reset() -> None:
     assert state.max_medium_wait == 0
     assert state.deadline_missed_count == 0
     assert state.wait_steps_std == 0.0
-    assert len(state.to_vector()) == 14
+    assert state.deferred_low_count == 0
+    assert len(state.to_vector()) == 19
+
+
+def test_scheduler_env_defers_low_priority_during_peak_hours() -> None:
+    env = SchedulerEnv(
+        events=[
+            CDCEvent(
+                "low_peak",
+                "low",
+                arrival_step=0,
+                sync_cost=1.0,
+                arrival_hour=12,
+            )
+        ],
+        queue_capacity=100,
+        defer_low_priority=True,
+        off_peak_start_hour=0,
+        off_peak_end_hour=6,
+    )
+
+    state = env.reset()
+
+    assert state.priority_counts["low"] == 0
+    assert state.deferred_low_count == 1
+    assert state.is_off_peak == 0.0
+
+
+def test_scheduler_env_releases_deferred_low_during_off_peak_window() -> None:
+    env = SchedulerEnv(
+        events=[
+            CDCEvent(
+                "low_off_peak",
+                "low",
+                arrival_step=0,
+                sync_cost=1.0,
+                arrival_hour=2,
+            )
+        ],
+        queue_capacity=100,
+        defer_low_priority=True,
+        off_peak_start_hour=0,
+        off_peak_end_hour=6,
+    )
+
+    state = env.reset()
+
+    assert state.priority_counts["low"] == 1
+    assert state.deferred_low_count == 0
+    assert state.is_off_peak == 1.0
+
+
+def test_scheduler_env_not_done_while_deferred_low_events_remain() -> None:
+    env = SchedulerEnv(
+        events=[
+            CDCEvent(
+                "low_peak",
+                "low",
+                arrival_step=0,
+                sync_cost=1.0,
+                arrival_hour=12,
+            )
+        ],
+        queue_capacity=100,
+        defer_low_priority=True,
+        off_peak_start_hour=0,
+        off_peak_end_hour=6,
+        low_force_release_wait_steps=1000,
+    )
+
+    env.reset()
+    _, _, done, _ = env.step(0)
+
+    assert done is False
 
 
 def test_scheduler_state_masks_aggressive_low_priority_actions_when_high_is_waiting() -> None:
@@ -244,6 +324,31 @@ def test_export_policy_comparison_uses_cache_when_input_unchanged() -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def test_load_scheduler_events_uses_real_timestamp_gaps_for_arrival_steps() -> None:
+    temp_dir = _make_scheduler_temp_dir()
+    try:
+        data_path = temp_dir / "events.csv"
+        frame = pd.DataFrame(
+            {
+                "event_id": ["e1", "e2", "e3"],
+                "timestamp": [
+                    "2024-01-01 00:00:00",
+                    "2024-01-01 00:00:01",
+                    "2024-01-01 00:00:10",
+                ],
+                "priority_label": ["low", "medium", "high"],
+                "estimated_sync_cost": [1.0, 1.0, 1.0],
+            }
+        )
+        frame.to_csv(data_path, index=False)
+
+        events = load_scheduler_events(data_path)
+
+        assert [event.arrival_step for event in events] == [0, 1, 10]
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def test_export_policy_comparison_figure_writes_image() -> None:
     temp_dir = _make_scheduler_temp_dir()
     try:
@@ -427,6 +532,31 @@ def test_ppo_agent_can_sample_and_optimize() -> None:
     assert isinstance(loss, float)
 
 
+def test_double_dqn_agent_can_optimize() -> None:
+    agent = DoubleDQNAgent(
+        action_count=6,
+        state_dim=8,
+        replay_capacity=16,
+        batch_size=4,
+        device="cpu",
+    )
+
+    for index in range(6):
+        state = [float(index), 1.0, 2.0, 3.0, 4.0, 5.0, 0.2, 0.4]
+        next_state = [float(index + 1), 1.5, 2.5, 3.5, 4.5, 5.5, 0.3, 0.5]
+        agent.store_transition(
+            state=state,
+            action=index % 6,
+            reward=1.0,
+            next_state=next_state,
+            done=index == 5,
+        )
+
+    loss = agent.optimize()
+
+    assert isinstance(loss, float)
+
+
 def test_ppo_agent_respects_allowed_action_mask() -> None:
     agent = PPOAgent(
         action_count=6,
@@ -467,3 +597,112 @@ def test_validation_candidate_selection_prefers_lower_high_delay_when_rewards_ar
         high_delay_tolerance=10.0,
         fairness_tolerance=1e-4,
     )
+
+
+def test_run_scheduler_training_smoke(monkeypatch) -> None:
+    temp_dir = _make_scheduler_temp_dir().resolve()
+    try:
+        project_root = temp_dir
+        dataset_dir = project_root / "data" / "scheduler_processed"
+        output_dir = project_root / "outputs" / "scheduler"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        frame = pd.DataFrame(
+            {
+                "event_id": [f"e{i}" for i in range(1, 13)],
+                "timestamp": [
+                    "2024-01-01 00:00:01",
+                    "2024-01-01 00:00:02",
+                    "2024-01-01 00:00:03",
+                    "2024-01-01 00:00:04",
+                    "2024-01-01 00:00:05",
+                    "2024-01-01 00:00:06",
+                    "2024-01-01 00:00:07",
+                    "2024-01-01 00:00:08",
+                    "2024-01-01 00:00:09",
+                    "2024-01-01 00:00:10",
+                    "2024-01-01 00:00:11",
+                    "2024-01-01 00:00:12",
+                ],
+                "priority_label": [
+                    "high", "medium", "low",
+                    "high", "medium", "low",
+                    "high", "medium", "low",
+                    "high", "medium", "low",
+                ],
+                "estimated_sync_cost": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+                "deadline": [5.0] * 12,
+            }
+        )
+        frame.iloc[:8].to_csv(dataset_dir / "train.csv", index=False)
+        frame.iloc[8:10].to_csv(dataset_dir / "valid.csv", index=False)
+        frame.iloc[10:].to_csv(dataset_dir / "test.csv", index=False)
+
+        config_path = project_root / "scheduler_smoke.yaml"
+        config = {
+            "dataset_config": str(project_root / "configs" / "dataset.yaml"),
+            "scheduler_dataset_dir": str(dataset_dir),
+            "classifier_output_dir": str(project_root / "outputs" / "classifier"),
+            "algorithm": "dqn",
+            "episode_count": 1,
+            "max_steps_per_episode": 8,
+            "train_event_window": 6,
+            "valid_event_window": 2,
+            "random_state": 42,
+            "queue_capacity": 100,
+            "starvation_threshold": 5,
+            "defer_low_priority": True,
+            "low_release_batch_size": 2,
+            "low_release_load_threshold": 0.35,
+            "low_release_high_queue_threshold": 2,
+            "low_force_release_wait_steps": 10,
+            "off_peak_start_hour": 0,
+            "off_peak_end_hour": 6,
+            "gamma": 0.99,
+            "learning_rate": 0.001,
+            "batch_size": 4,
+            "replay_capacity": 32,
+            "target_update_interval": 4,
+            "epsilon_start": 1.0,
+            "epsilon_end": 0.05,
+            "epsilon_decay": 0.99,
+            "reward_weights": {
+                "throughput_weight": 1.0,
+                "delay_weight": 0.1,
+                "fairness_weight": 0.5,
+                "deferred_low_weight": 0.05,
+                "off_peak_release_weight": 0.1,
+                "deadline_weight": 2.0,
+            },
+            "output_dir": str(output_dir),
+            "run_name": "pytest_scheduler_smoke",
+        }
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+        monkeypatch.setattr(
+            "cdc_priority.scheduler.training.default_settings",
+            lambda: AppSettings(
+                project_root=project_root,
+                configs_dir=project_root / "configs",
+                outputs_dir=project_root / "outputs",
+            ),
+        )
+
+        resolved_output_dir = run_scheduler_training(config_path)
+
+        report_path = output_dir / "pytest_scheduler_smoke" / "scheduler_report.json"
+        comparison_path = output_dir / "pytest_scheduler_smoke" / "policy_comparison.csv"
+        model_path = output_dir / "pytest_scheduler_smoke" / "dqn_agent.pt"
+
+        assert report_path.exists()
+        assert comparison_path.exists()
+        assert model_path.exists()
+        assert resolved_output_dir == output_dir / "pytest_scheduler_smoke"
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["algorithm"] == "dqn"
+        assert "dqn_test_metrics" in report
+        assert "policy_comparison" in report
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
